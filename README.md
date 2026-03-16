@@ -1,116 +1,124 @@
 # TrashClaw
 
-**Local LLM agent running on a 2013 Mac Pro trashcan.**
+A local tool-use coding agent that runs on a 2013 Mac Pro ("trashcan"). No cloud, no API keys — just llama.cpp and a single Python file with zero dependencies.
 
-Built by [Elyan Labs](https://rustchain.org). Because vintage hardware deserves a second life as an AI workstation.
+## What it does
 
-## What Is This?
+TrashClaw is a terminal agent that reads files, edits code, runs commands, and searches codebases using a local LLM. It follows the tool-use pattern: the model decides what tools to call, sees the results, and iterates until the task is done.
 
-TrashClaw is a Claude Code-inspired local agent that runs entirely on a 2013 Mac Pro ("trashcan") using llama.cpp for inference. Zero cloud dependency, zero pip installs, pure Python stdlib.
+```
+trashclaw src> add error handling to the parse function
 
-### Hardware
+  [read] src/parser.py
+  [edit] src/parser.py
+  [run] python3 -m pytest tests/ [y/N] y
 
-| Component | Spec |
-|-----------|------|
-| **CPU** | Intel Xeon E5-1650 v2 @ 3.50GHz (6c/12t, Ivy Bridge) |
-| **RAM** | 16GB DDR3 |
-| **GPU** | 2x AMD FirePro D500 (3GB VRAM each, Metal GPUFamily macOS 2) |
-| **OS** | macOS Monterey 12.7.6 |
-| **Storage** | 1TB SSD |
+  Added try/except to parse(). All 12 tests pass.
+```
 
-### Performance
+It works with any OpenAI-compatible endpoint (llama.cpp server, Ollama, vLLM, etc). The interesting part is the hardware we're running it on.
 
-| Metric | Speed |
-|--------|-------|
-| Prompt processing | **62.5 tokens/sec** |
-| Text generation | **47.4 tokens/sec** |
-| Model | TinyLlama 1.1B Q4_K_M (638MB) |
+## The hardware
 
-## Quick Start
+We're running this on a 2013 Mac Pro — the cylinder everyone called a trash can.
 
-### 1. Build llama.cpp
+- Xeon E5-1650 v2 (6c/12t, 3.5GHz, Ivy Bridge)
+- 2x AMD FirePro D500 (3GB VRAM each)
+- 16GB DDR3, macOS Monterey 12.7.6
+- ~$150 on eBay
+
+With Qwen2.5-3B (Q4_K_M, 2GB) it does 15.6 tokens/sec generation on CPU. That's 2+ seconds for a typical agent response — usable for real work.
+
+### Metal on discrete AMD GPUs
+
+The FirePro D500s support Metal (GPUFamily macOS 2), but llama.cpp's Metal backend crashed on load because it assumes unified memory. The `set_tensor` and `get_tensor` functions use `newBufferWithBytesNoCopy` with `StorageModeShared`, which returns nil on discrete GPUs.
+
+The [fix](https://github.com/ggml-org/llama.cpp/pull/20615) is three hunks: use `newBufferWithBytes` + `StorageModeManaged` when `has_unified_memory` is false, plus a `memcpy` on the get path. Prompt processing is 16% faster with Metal on the 3B model; generation is slower due to PCIe round-trips, so CPU wins there.
+
+| Model (Qwen 3B Q4) | pp128 | tg32 |
+|---------------------|-------|------|
+| CPU-only (12 threads) | 20.3 t/s | **15.5 t/s** |
+| Metal (ngl=99) | **23.4 t/s** | 2.9 t/s |
+
+This should work on any Mac with a discrete AMD GPU (2013-2019 Mac Pro, iMac, MacBook Pro with Radeon).
+
+## Tools
+
+| Tool | Description |
+|------|-------------|
+| `read_file` | Read files with optional line range |
+| `write_file` | Create new files |
+| `edit_file` | Find-and-replace (must match uniquely) |
+| `run_command` | Shell execution with approval prompt |
+| `search_files` | Regex search across files |
+| `find_files` | Glob pattern matching |
+| `list_dir` | Directory listing |
+| `think` | Internal reasoning (no side effects) |
+
+The agent loop runs up to 15 tool rounds per request. The LLM decides which tools to call based on the system prompt and conversation context.
+
+### Model compatibility
+
+Tool calls are parsed three ways, so it works with most models:
+
+1. Native function calling (Qwen 2.5, Llama 3.1+, Mistral)
+2. `<tool_call>` XML tags
+3. JSON in code blocks or bare JSON
+
+Qwen2.5-3B-Instruct is the sweet spot for this hardware — small enough to fit, capable enough for tool use.
+
+## Setup
 
 ```bash
+# Build llama.cpp
 git clone --depth 1 https://github.com/ggml-org/llama.cpp.git
 cd llama.cpp && mkdir build && cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release -DGGML_METAL=OFF
-make -j6
-```
+cmake .. -DCMAKE_BUILD_TYPE=Release && make -j6
 
-### 2. Download a model
-
-```bash
+# Get a model
 mkdir -p ~/models
-curl -L -o ~/models/tinyllama-1.1b-q4.gguf \
-  "https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf"
-```
+curl -L -o ~/models/qwen2.5-3b-instruct-q4.gguf \
+  "https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf"
 
-### 3. Start the server
+# Start the server
+./bin/llama-server --host 0.0.0.0 --port 8080 \
+  -m ~/models/qwen2.5-3b-instruct-q4.gguf -t 12 -c 4096
 
-```bash
-~/llama.cpp/build/bin/llama-server \
-  --host 0.0.0.0 --port 8080 \
-  -m ~/models/tinyllama-1.1b-q4.gguf \
-  -t 10 -c 2048
-```
-
-### 4. Run TrashClaw
-
-```bash
+# Run the agent (separate terminal)
 python3 trashclaw.py
 ```
 
-## Commands
-
-| Command | Description |
-|---------|-------------|
-| `/run <cmd>` | Execute a shell command |
-| `/read <file>` | Read a file |
-| `/clear` | Clear conversation context |
-| `/status` | Check server and context info |
-| `/help` | Show available commands |
-| `/exit` | Exit TrashClaw |
-
-Type anything else to chat with the local LLM. If it suggests bash commands, TrashClaw will offer to run them for you.
+No pip install. No venv. Just Python 3.7+ stdlib.
 
 ## Configuration
 
-| Environment Variable | Default | Description |
-|---------------------|---------|-------------|
-| `TRASHCLAW_URL` | `http://localhost:8080` | llama-server endpoint |
+| Variable | Default | What |
+|----------|---------|------|
+| `TRASHCLAW_URL` | `http://localhost:8080` | Server endpoint |
+| `TRASHCLAW_MAX_ROUNDS` | `15` | Tool rounds per request |
+| `TRASHCLAW_AUTO_SHELL` | `0` | Skip command approval if `1` |
 
-## Why a Trashcan?
+```bash
+# Point at a remote server
+TRASHCLAW_URL=http://192.168.0.50:8080 python3 trashclaw.py
 
-The 2013 Mac Pro is one of the most polarizing designs Apple ever made. It was mocked for looking like a trash can, praised for its thermal engineering, and ultimately abandoned when Apple couldn't figure out how to upgrade it.
+# Work in a specific directory
+python3 trashclaw.py --cwd ~/myproject
+```
 
-But it has:
-- A Xeon workstation CPU that still holds its own
-- Dual AMD FirePro GPUs with **Metal support** (GPU inference coming soon)
-- Thunderbolt 2, USB 3.0, HDMI — still relevant I/O
-- A form factor that fits anywhere
+## Limitations
 
-We think it deserves better than a landfill. TrashClaw gives it a new purpose: **local AI inference and agent automation**.
+- **3B models are limited.** Complex refactoring or multi-file changes often need manual correction. A 7B+ model would help but needs more RAM or GPU offload.
+- **No streaming.** Responses appear all at once after generation completes.
+- **Single-GPU only.** llama.cpp uses `MTLCreateSystemDefaultDevice()` — only one of the two D500s is used.
+- **Discrete GPU overhead.** Every Metal tensor operation copies across PCIe. For small models, CPU is faster for generation.
 
-## Roadmap
+## What this isn't
 
-- [ ] Metal GPU acceleration for the FirePro D500s
-- [ ] Larger models (Phi-3, Qwen 3B, DeepSeek-Coder 6.7B)
-- [ ] Tool use / function calling
-- [ ] File editing capabilities
-- [ ] RustChain miner integration (earn RTC while you code)
-- [ ] Multi-model PostMath consensus (run multiple models, synthesize)
+This is not a replacement for Claude Code or Cursor. Those use frontier models with 200B+ parameters and sophisticated context management. TrashClaw is a 3B model on a 12-year-old computer.
 
-## Part of the Elyan Labs Ecosystem
-
-- [RustChain](https://github.com/Scottcjn/Rustchain) — Proof-of-Antiquity blockchain rewarding vintage hardware
-- [BoTTube](https://bottube.ai) — AI video platform
-- [llama-cpp-power8](https://github.com/Scottcjn/llama-cpp-power8) — LLM inference on IBM POWER8
-- [RAM Coffers](https://github.com/Scottcjn/ram-coffers) — Neuromorphic NUMA weight banking
+What it *is*: proof that local tool-use agents work on hardware most people threw away. The interaction pattern — model calls tools, sees results, iterates — doesn't need GPT-4. It needs a model that can follow a system prompt and output structured tool calls. Qwen 3B does this well enough.
 
 ## License
 
 MIT
-
----
-
-*Built on a trashcan. Powered by vintage silicon. No cloud required.*
