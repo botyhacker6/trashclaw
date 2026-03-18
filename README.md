@@ -172,3 +172,7 @@ TrashClaw accepts contributions! Check the [bounty board](https://github.com/Sco
 TrashClaw was born when our [Metal fix for discrete AMD GPUs](https://github.com/ggml-org/llama.cpp/pull/20615) was closed by llama.cpp maintainers without review. Instead of waiting for permission, we built our own agent around the hardware they rejected. The trashcan Mac Pro runs inference just fine — and now it has its own agent framework to prove it.
 
 *Every CPU deserves a voice.*
+
+
+### Windows Troubleshooting
+If you encounter `pyreadline3` installation errors, ensure you are using an elevated PowerShell session.
